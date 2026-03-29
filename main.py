@@ -1,21 +1,18 @@
 import os
 import asyncio
 import logging
-import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from anthropic import Anthropic
 
+from sportradar_api import fetch_ball_data
 from player_prices import AUCTION_PRICES
 
 # ─── CONFIG ─────────────────────────────────────────────
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-# ⚠️ Replace with LIVE IPL match ID (update manually for now)
-MATCH_ID = "ipl_match_id_here"
-
-POLL_INTERVAL = 3
+POLL_INTERVAL = 2
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPLClaw")
@@ -23,30 +20,18 @@ logger = logging.getLogger("IPLClaw")
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 subscribed_chats = set()
-last_ball_id = None
+last_event_id = None
 player_stats = {}
 
-# ─── FETCH CRICBUZZ COMMENTARY ─────────────────────────
-async def fetch_commentary():
-    url = f"https://www.cricbuzz.com/api/cricket-match/commentary/{MATCH_ID}"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    async with httpx.AsyncClient() as http:
-        res = await http.get(url, headers=headers)
-        return res.json()
-
 # ─── PROCESS BALL ──────────────────────────────────────
-def process_ball(ball):
-    batsman = ball.get("batsmanName")
-    bowler = ball.get("bowlerName")
-    runs = ball.get("runs", 0)
-    over = ball.get("overNumber")
-
-    if not batsman:
+def process_event(event):
+    if event.get("type") != "delivery":
         return None
+
+    batsman = event["player"]["name"]
+    bowler = event["bowler"]["name"]
+    runs = event.get("runs", 0)
+    over = event.get("over")
 
     if batsman not in player_stats:
         player_stats[batsman] = {"runs": 0, "balls": 0}
@@ -61,7 +46,7 @@ def calculate_roi(player):
     data = AUCTION_PRICES.get(player)
 
     if not data:
-        return None, "Unknown 🤷"
+        return "N/A", "Unknown 🤷"
 
     runs = player_stats[player]["runs"]
     price = data["price_cr"]
@@ -69,9 +54,9 @@ def calculate_roi(player):
     per_match_lakh = (price / 14) * 100
 
     if runs == 0:
-        return "∞", "DAYLIGHT ROBBERY 💀"
+        return "∞", "SCAM 💀"
 
-    cost_per_run = round(per_match_lakh / runs, 1)
+    cost = round(per_match_lakh / runs, 1)
 
     if runs >= 50:
         verdict = "MEGA STEAL 🤑"
@@ -80,39 +65,36 @@ def calculate_roi(player):
     elif runs >= 15:
         verdict = "OVERPRICED 😬"
     else:
-        verdict = "FLOP SHOW 💀"
+        verdict = "FLOP 💀"
 
-    return cost_per_run, verdict
+    return cost, verdict
 
 # ─── AI ROAST ──────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are IPLClaw 💀 — savage IPL commentator.
+You are IPLClaw 💀 savage commentator.
 
 Rules:
-- Roast players using auction price vs performance
-- Use Hinglish
+- Hinglish
 - Max 2 lines
-- Brutal + funny
-- Use emojis: 💀🔥🤡🤑😭
+- Roast using price vs performance
+- Funny + brutal
 """
 
 async def generate_roast(prompt):
     try:
-        msg = client.messages.create(
+        res = client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=120,
+            max_tokens=100,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}]
         )
-        return msg.content[0].text
-    except Exception as e:
-        logger.error(e)
-        return "Roast engine broke 💀"
+        return res.content[0].text
+    except:
+        return "Roast failed 💀"
 
-# ─── BALL ROAST BUILDER ────────────────────────────────
+# ─── BUILD MESSAGE ─────────────────────────────────────
 async def build_message(batsman, bowler, runs, over):
     price = AUCTION_PRICES.get(batsman, {}).get("price_cr", "unknown")
-
     cost, verdict = calculate_roi(batsman)
 
     prompt = f"""
@@ -121,13 +103,12 @@ async def build_message(batsman, bowler, runs, over):
     Runs: {runs}
     Price: ₹{price} Cr
 
-    Roast this moment in IPL match.
-    Compare performance vs price.
+    Roast this moment and judge paisa vasool.
     """
 
     roast = await generate_roast(prompt)
 
-    return f"""🏏 {over} {batsman} - {runs} run
+    return f"""🏏 {over} {batsman} - {runs}
 
 💀 {roast}
 
@@ -135,26 +116,23 @@ async def build_message(batsman, bowler, runs, over):
 Verdict: {verdict}
 """
 
-# ─── TELEGRAM COMMANDS ─────────────────────────────────
+# ─── COMMANDS ───────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🏏💀 IPLClaw LIVE\n\n"
-        "/subscribe → ball-by-ball roasting\n"
-        "/unsubscribe → stop"
+        "🏏💀 IPLClaw LIVE\n\n/subscribe to start"
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed_chats.add(update.effective_chat.id)
-    await update.message.reply_text("🔥 Subscribed — chaos incoming 💀")
+    await update.message.reply_text("Subscribed 🔥")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed_chats.discard(update.effective_chat.id)
-    await update.message.reply_text("Stopped updates")
+    await update.message.reply_text("Stopped")
 
-# ─── POLLING LOOP ──────────────────────────────────────
+# ─── POLLING ───────────────────────────────────────────
 async def poll(app):
-    global last_ball_id
-
+    global last_event_id
     bot = app.bot
 
     while True:
@@ -163,34 +141,31 @@ async def poll(app):
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
-            data = await fetch_commentary()
+            data = await fetch_ball_data()
 
-            balls = data.get("commentaryList", [])
+            events = data.get("timeline", [])
 
-            if not balls:
+            if not events:
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
-            latest = balls[0]
-            ball_id = latest.get("commId")
+            latest = events[-1]
+            event_id = latest.get("id")
 
-            if ball_id != last_ball_id:
-                last_ball_id = ball_id
+            if event_id != last_event_id:
+                last_event_id = event_id
 
-                processed = process_ball(latest)
+                processed = process_event(latest)
 
                 if processed:
                     batsman, bowler, runs, over = processed
-
-                    msg = await build_message(
-                        batsman, bowler, runs, over
-                    )
+                    msg = await build_message(batsman, bowler, runs, over)
 
                     for chat_id in subscribed_chats:
                         await bot.send_message(chat_id=chat_id, text=msg)
 
         except Exception as e:
-            logger.error(f"Polling error: {e}")
+            logger.error(e)
 
         await asyncio.sleep(POLL_INTERVAL)
 
@@ -202,8 +177,13 @@ def main():
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
 
-    # Start background polling task
-    app.job_queue.run_once(lambda ctx: asyncio.create_task(poll(app)), 0)
+    async def on_start(app):
+        asyncio.create_task(poll(app))
 
-    print("🔥 BOT RUNNING ON RAILWAY...")
+    app.post_init = on_start
+
+    print("🔥 Sportradar Bot Running...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
