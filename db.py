@@ -1,11 +1,10 @@
 import os
-import psycopg2
 import time
+import psycopg
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-conn = psycopg2.connect(DATABASE_URL)
-conn.autocommit = True
+conn = psycopg.connect(DATABASE_URL, autocommit=True)
 
 def create_table():
     with conn.cursor() as cur:
