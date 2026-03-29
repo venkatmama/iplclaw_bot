@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from anthropic import Anthropic
 
-from sportradar_api import fetch_ball_data
+from sportradar_api import get_live_match, fetch_timeline
 from player_prices import AUCTION_PRICES
 
 # ─── CONFIG ─────────────────────────────────────────────
@@ -15,23 +15,40 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 POLL_INTERVAL = 2
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("IPLClaw")
+logger = logging.getLogger("IPLClaw-Pro")
 
 client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 subscribed_chats = set()
 last_event_id = None
 player_stats = {}
+current_match_id = None
 
-# ─── PROCESS BALL ──────────────────────────────────────
+# ─── NAME MATCH FIX ─────────────────────────────────────
+def get_player_data(name):
+    if name in AUCTION_PRICES:
+        return AUCTION_PRICES[name]
+
+    for p in AUCTION_PRICES:
+        if name.lower() in p.lower():
+            return AUCTION_PRICES[p]
+
+    return None
+
+# ─── PROCESS EVENT ─────────────────────────────────────
 def process_event(event):
-    if event.get("type") != "delivery":
+    etype = event.get("type")
+
+    if etype not in ["delivery", "wicket"]:
         return None
 
-    batsman = event["player"]["name"]
-    bowler = event["bowler"]["name"]
+    batsman = event.get("player", {}).get("name")
+    bowler = event.get("bowler", {}).get("name")
     runs = event.get("runs", 0)
     over = event.get("over")
+
+    if not batsman:
+        return None
 
     if batsman not in player_stats:
         player_stats[batsman] = {"runs": 0, "balls": 0}
@@ -39,11 +56,17 @@ def process_event(event):
     player_stats[batsman]["runs"] += runs
     player_stats[batsman]["balls"] += 1
 
-    return batsman, bowler, runs, over
+    return {
+        "type": etype,
+        "batsman": batsman,
+        "bowler": bowler,
+        "runs": runs,
+        "over": over
+    }
 
-# ─── ROI CALCULATION ───────────────────────────────────
+# ─── ROI ───────────────────────────────────────────────
 def calculate_roi(player):
-    data = AUCTION_PRICES.get(player)
+    data = get_player_data(player)
 
     if not data:
         return "N/A", "Unknown 🤷"
@@ -71,13 +94,13 @@ def calculate_roi(player):
 
 # ─── AI ROAST ──────────────────────────────────────────
 SYSTEM_PROMPT = """
-You are IPLClaw 💀 savage commentator.
+You are IPLClaw 💀 savage IPL commentator.
 
 Rules:
 - Hinglish
 - Max 2 lines
 - Roast using price vs performance
-- Funny + brutal
+- Funny, brutal, meme style
 """
 
 async def generate_roast(prompt):
@@ -92,23 +115,55 @@ async def generate_roast(prompt):
     except:
         return "Roast failed 💀"
 
-# ─── BUILD MESSAGE ─────────────────────────────────────
-async def build_message(batsman, bowler, runs, over):
-    price = AUCTION_PRICES.get(batsman, {}).get("price_cr", "unknown")
+# ─── MESSAGE BUILDER ───────────────────────────────────
+async def build_message(event):
+    batsman = event["batsman"]
+    bowler = event["bowler"]
+    runs = event["runs"]
+    over = event["over"]
+    etype = event["type"]
+
+    data = get_player_data(batsman)
+    price = data["price_cr"] if data else "unknown"
+
     cost, verdict = calculate_roi(batsman)
 
-    prompt = f"""
-    Over {over}
-    {batsman} vs {bowler}
-    Runs: {runs}
-    Price: ₹{price} Cr
+    # WICKET ROAST
+    if etype == "wicket":
+        prompt = f"""
+        {batsman} OUT
+        Runs: {player_stats[batsman]['runs']}
+        Price: ₹{price} Cr
 
-    Roast this moment and judge paisa vasool.
-    """
+        Roast brutally. Mention waste of money.
+        """
 
-    roast = await generate_roast(prompt)
+        roast = await generate_roast(prompt)
 
-    return f"""🏏 {over} {batsman} - {runs}
+        return f"""🚨 WICKET {over}
+
+{batsman} OUT 💀
+
+💀 {roast}
+
+💰 Cost/run: ₹{cost} lakh
+Verdict: {verdict}
+"""
+
+    # NORMAL BALL
+    else:
+        prompt = f"""
+        Over {over}
+        {batsman} vs {bowler}
+        Runs: {runs}
+        Price: ₹{price} Cr
+
+        Roast performance vs price.
+        """
+
+        roast = await generate_roast(prompt)
+
+        return f"""🏏 {over} {batsman} - {runs}
 
 💀 {roast}
 
@@ -119,12 +174,12 @@ Verdict: {verdict}
 # ─── COMMANDS ───────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🏏💀 IPLClaw LIVE\n\n/subscribe to start"
+        "💀 IPLClaw PRO LIVE\n\n/subscribe to start roasting"
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed_chats.add(update.effective_chat.id)
-    await update.message.reply_text("Subscribed 🔥")
+    await update.message.reply_text("🔥 Subscribed")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribed_chats.discard(update.effective_chat.id)
@@ -132,7 +187,8 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── POLLING ───────────────────────────────────────────
 async def poll(app):
-    global last_event_id
+    global last_event_id, current_match_id
+
     bot = app.bot
 
     while True:
@@ -141,8 +197,13 @@ async def poll(app):
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
-            data = await fetch_ball_data()
+            if not current_match_id:
+                current_match_id = await get_live_match()
+                print("Match ID:", current_match_id)
+                await asyncio.sleep(3)
+                continue
 
+            data = await fetch_timeline(current_match_id)
             events = data.get("timeline", [])
 
             if not events:
@@ -158,8 +219,7 @@ async def poll(app):
                 processed = process_event(latest)
 
                 if processed:
-                    batsman, bowler, runs, over = processed
-                    msg = await build_message(batsman, bowler, runs, over)
+                    msg = await build_message(processed)
 
                     for chat_id in subscribed_chats:
                         await bot.send_message(chat_id=chat_id, text=msg)
@@ -182,7 +242,7 @@ def main():
 
     app.post_init = on_start
 
-    print("🔥 Sportradar Bot Running...")
+    print("🔥 IPLClaw PRO RUNNING...")
     app.run_polling()
 
 if __name__ == "__main__":
