@@ -6,23 +6,17 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     MessageHandler, filters, PreCheckoutQueryHandler
 )
-from anthropic import Anthropic
 
 from sportradar_api import get_live_match, fetch_timeline
-from player_prices import AUCTION_PRICES
 from payments import PREMIUM_TITLE, PREMIUM_DESC, get_prices
-from storage import start_trial, activate_paid, is_premium, has_used_trial
+from db import create_table, add_user_if_not_exists, activate_paid, is_premium, has_user
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPLClaw")
 
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
-
 live_chats = set()
-player_stats = {}
 last_event_id = None
 current_match_id = None
 
@@ -30,8 +24,8 @@ current_match_id = None
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    if not has_used_trial(user_id):
-        start_trial(user_id)
+    if not has_user(user_id):
+        add_user_if_not_exists(user_id)
         msg = "🔥 1 DAY FREE TRIAL STARTED\n\nUse /live"
     else:
         msg = "Welcome back 💀\nUse /live or /premium"
@@ -59,36 +53,18 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await update.message.reply_text("🔥 Lifetime Activated 💀")
 
-# ─── LIVE COMMAND ──────────────────────────────────────
+# ─── LIVE ──────────────────────────────────────────────
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not is_premium(user_id):
         await update.message.reply_text(
-            "💀 Trial expired\nUse /premium to continue"
+            "💀 Trial expired\nUse /premium"
         )
         return
 
     live_chats.add(update.effective_chat.id)
-    await update.message.reply_text("🔥 Live updates started 💀")
-
-# ─── EVENT PROCESS ─────────────────────────────────────
-def process_event(event):
-    if event.get("type") != "delivery":
-        return None
-
-    player = event.get("player", {}).get("name")
-    runs = event.get("runs", 0)
-
-    if not player:
-        return None
-
-    if player not in player_stats:
-        player_stats[player] = {"runs": 0}
-
-    player_stats[player]["runs"] += runs
-
-    return player, runs
+    await update.message.reply_text("🔥 Live updates started")
 
 # ─── POLLING ───────────────────────────────────────────
 async def poll(app):
@@ -120,11 +96,10 @@ async def poll(app):
             if event_id != last_event_id:
                 last_event_id = event_id
 
-                processed = process_event(latest)
+                player = latest.get("player", {}).get("name")
+                runs = latest.get("runs", 0)
 
-                if processed:
-                    player, runs = processed
-
+                if player:
                     msg = f"🏏 {player} scored {runs} 💀"
 
                     for chat_id in live_chats:
@@ -137,6 +112,8 @@ async def poll(app):
 
 # ─── MAIN ──────────────────────────────────────────────
 def main():
+    create_table()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -151,7 +128,7 @@ def main():
 
     app.post_init = on_start
 
-    print("🔥 IPLClaw LIVE RUNNING")
+    print("🔥 IPLClaw LIVE WITH DB")
     app.run_polling()
 
 if __name__ == "__main__":
