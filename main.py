@@ -174,7 +174,7 @@ Verdict: {verdict}
 # ─── COMMANDS ───────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💀 IPLClaw PRO LIVE\n\n/subscribe to start roasting"
+        "💀 IPL PRO LIVE...\n\nThis is just for fun, so no hard feelings..\n\nI beleive you will enjoy it very much.../subscribe to start roasting"
     )
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
