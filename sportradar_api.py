@@ -17,7 +17,6 @@ async def get_live_match():
 
     return None
 
-
 async def fetch_timeline(match_id):
     url = f"{BASE_URL}/matches/{match_id}/timeline.json?api_key={API_KEY}"
 
