@@ -6,71 +6,80 @@ from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     MessageHandler, filters, PreCheckoutQueryHandler
 )
+from anthropic import Anthropic
 
-from sportradar_api import get_live_match, fetch_timeline
-from payments import PREMIUM_TITLE, PREMIUM_DESC, get_prices
-from db import create_table, add_user_if_not_exists, activate_paid, is_premium, has_user
+from sportradar_api import get_match, fetch_timeline
+from db import create_table, add_user, activate_paid, is_premium
+from payments import get_prices
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("IPLClaw")
 
 live_chats = set()
 last_event_id = None
-current_match_id = None
+player_stats = {}
+
+# ─── AI ROAST ──────────────────────────────────────────
+async def generate_roast(player, runs):
+    try:
+        prompt = f"{player} scored {runs}. Roast based on IPL price vs performance."
+        res = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=80,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return res.content[0].text
+    except:
+        return "💀 performance speaks for itself"
 
 # ─── START ─────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    add_user(user_id)
 
-    if not has_user(user_id):
-        add_user_if_not_exists(user_id)
-        msg = "🔥 1 DAY FREE TRIAL STARTED\n\nUse /live"
-    else:
-        msg = "Welcome back 💀\nUse /live or /premium"
-
-    await update.message.reply_text(msg)
-
-# ─── PAYMENT ───────────────────────────────────────────
-async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_invoice(
-        title=PREMIUM_TITLE,
-        description=PREMIUM_DESC,
-        payload="lifetime",
-        provider_token="",
-        currency="XTR",
-        prices=get_prices(),
-        start_parameter="premium"
+    await update.message.reply_text(
+        "🔥 1-day trial started\n\nUse /live"
     )
-
-async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    activate_paid(user_id)
-
-    await update.message.reply_text("🔥 Lifetime Activated 💀")
 
 # ─── LIVE ──────────────────────────────────────────────
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if not is_premium(user_id):
-        await update.message.reply_text(
-            "💀 Trial expired\nUse /premium"
-        )
+        await update.message.reply_text("💀 Trial expired → /premium")
         return
 
     live_chats.add(update.effective_chat.id)
-    await update.message.reply_text("🔥 Live updates started")
+    await update.message.reply_text("🔥 Live started")
+
+# ─── PAYMENT ───────────────────────────────────────────
+async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_invoice(
+        title="IPLClaw Lifetime 💀",
+        description="Full access",
+        payload="premium",
+        provider_token="",
+        currency="XTR",
+        prices=get_prices()
+    )
+
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
+
+async def success(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    activate_paid(update.effective_user.id)
+    await update.message.reply_text("🔥 Lifetime unlocked")
 
 # ─── POLLING ───────────────────────────────────────────
 async def poll(app):
-    global last_event_id, current_match_id
+    global last_event_id
 
     bot = app.bot
+    match_id = await get_match()
 
     while True:
         try:
@@ -78,12 +87,7 @@ async def poll(app):
                 await asyncio.sleep(2)
                 continue
 
-            if not current_match_id:
-                current_match_id = await get_live_match()
-                await asyncio.sleep(3)
-                continue
-
-            data = await fetch_timeline(current_match_id)
+            data = await fetch_timeline(match_id)
             events = data.get("timeline", [])
 
             if not events:
@@ -100,13 +104,14 @@ async def poll(app):
                 runs = latest.get("runs", 0)
 
                 if player:
-                    msg = f"🏏 {player} scored {runs} 💀"
+                    roast = await generate_roast(player, runs)
+                    msg = f"🏏 {player} - {runs}\n💀 {roast}"
 
                     for chat_id in live_chats:
                         await bot.send_message(chat_id=chat_id, text=msg)
 
         except Exception as e:
-            logger.error(e)
+            print("ERROR:", e)
 
         await asyncio.sleep(2)
 
@@ -121,14 +126,14 @@ def main():
     app.add_handler(CommandHandler("premium", premium))
 
     app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, success))
 
     async def on_start(app):
         asyncio.create_task(poll(app))
 
     app.post_init = on_start
 
-    print("🔥 IPLClaw LIVE WITH DB")
+    print("🔥 BOT RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":
