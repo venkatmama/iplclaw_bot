@@ -202,11 +202,8 @@ def main():
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
 
-    async def runner():
-        asyncio.create_task(poll(app))
-        await app.run_polling()
+    # Start background polling task
+    app.job_queue.run_once(lambda ctx: asyncio.create_task(poll(app)), 0)
 
-    asyncio.run(runner())
-
-if __name__ == "__main__":
-    main()
+    print("🔥 BOT RUNNING ON RAILWAY...")
+    app.run_polling()
